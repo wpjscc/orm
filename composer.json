@@ -1,5 +1,5 @@
 {
-    "name": "cycle/orm",
+    "name": "wpjscc/orm",
     "type": "library",
     "license": "MIT",
     "description": "PHP DataMapper ORM and Data Modelling Engine",
