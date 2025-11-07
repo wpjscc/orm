@@ -17,7 +17,12 @@ final class Runner implements RunnerInterface
     private const MODE_CONTINUE_TRANSACTION = 1;
     private const MODE_OPEN_TRANSACTION = 2;
 
-    /** @var DriverInterface[] */
+    /**
+     * Map of original driver object id to the transactional driver instance
+     * to use for commit/rollback.
+     *
+     * @var array<int, DriverInterface>
+     */
     private array $drivers = [];
 
     /** @var CommandInterface[] */
@@ -75,11 +80,10 @@ final class Runner implements RunnerInterface
 
         if ($command->getDatabase() !== null) {
             $driver = $command->getDatabase()->getDriver();
+            $key = \spl_object_id($driver);
 
-            if (!\in_array($driver, $this->drivers, true)) {
-                $this->prepareTransaction($driver);
-
-                $this->drivers[] = $driver;
+            if (!isset($this->drivers[$key])) {
+                $this->drivers[$key] = $this->prepareTransaction($driver);
             }
         }
 
@@ -100,9 +104,9 @@ final class Runner implements RunnerInterface
     {
         if ($this->mode === self::MODE_OPEN_TRANSACTION) {
             // Commit all of the open and normalized database transactions
-            foreach (\array_reverse($this->drivers) as $driver) {
-                /** @var DriverInterface $driver */
-                $driver->commitTransaction();
+            foreach (\array_reverse($this->drivers) as $txDriver) {
+                /** @var DriverInterface $txDriver */
+                $txDriver->commitTransaction();
             }
         }
 
@@ -119,9 +123,9 @@ final class Runner implements RunnerInterface
     {
         if ($this->mode === self::MODE_OPEN_TRANSACTION) {
             // Close all open and normalized database transactions
-            foreach (\array_reverse($this->drivers) as $driver) {
-                /** @var DriverInterface $driver */
-                $driver->rollbackTransaction();
+            foreach (\array_reverse($this->drivers) as $txDriver) {
+                /** @var DriverInterface $txDriver */
+                $txDriver->rollbackTransaction();
             }
         }
 
@@ -135,10 +139,10 @@ final class Runner implements RunnerInterface
         $this->drivers = $this->executed = [];
     }
 
-    private function prepareTransaction(DriverInterface $driver): void
+    private function prepareTransaction(DriverInterface $driver): DriverInterface
     {
         if ($this->mode === self::MODE_IGNORE_TRANSACTION) {
-            return;
+            return $driver;
         }
 
         if ($this->mode === self::MODE_CONTINUE_TRANSACTION) {
@@ -148,9 +152,9 @@ final class Runner implements RunnerInterface
                     $driver->getType(),
                 ));
             }
-            return;
+            return $driver;
         }
 
-        $driver->beginTransaction();
+        return $driver->beginTransaction();
     }
 }
