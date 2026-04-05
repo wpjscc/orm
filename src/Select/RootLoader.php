@@ -48,7 +48,7 @@ final class RootLoader extends AbstractLoader
     ) {
         parent::__construct($ormSchema, $sourceProvider, $factory, $target);
         $this->query = $this->source->getDatabase()->select()->from(
-            \sprintf('%s AS %s', $this->source->getTable(), $this->getAlias()),
+            \sprintf('%s AS %s', $this->table, $this->getAlias()),
         );
         $this->columns = $this->normalizeColumns($this->define(SchemaInterface::COLUMNS));
 
@@ -67,10 +67,11 @@ final class RootLoader extends AbstractLoader
     /**
      * Primary column name list with table name like `table.column`.
      *
-     * @return string|string[]
+     * @return non-empty-string|non-empty-array<non-empty-string>
      */
     public function getPK(): array|string
     {
+        /** @var non-empty-string|non-empty-array<non-empty-string> $pk */
         $pk = $this->define(SchemaInterface::PRIMARY_KEY);
         if (\is_array($pk)) {
             $result = [];

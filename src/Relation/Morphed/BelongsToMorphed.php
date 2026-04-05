@@ -32,10 +32,8 @@ class BelongsToMorphed extends BelongsTo
     {
         $scope = $this->getReferenceScope($node);
         $nodeData = $node->getData();
-        if ($scope === null || !isset($nodeData[$this->morphKey])) {
-            $result = new Reference($node->getRole(), []);
-            $result->setValue(null);
-            return $result;
+        if (!isset($nodeData[$this->morphKey], $scope)) {
+            return new EmptyReference('?', null);
         }
         // $scope[$this->morphKey] = $nodeData[$this->morphKey];
         $target = $nodeData[$this->morphKey];
@@ -48,7 +46,7 @@ class BelongsToMorphed extends BelongsTo
         parent::prepare($pool, $tuple, $related, $load);
         $related = $tuple->state->getRelation($this->getName());
 
-        if ($related === null) {
+        if ($related === null || $related instanceof EmptyReference) {
             return;
         }
 
@@ -66,5 +64,15 @@ class BelongsToMorphed extends BelongsTo
     protected function assertValid(Node $related): void
     {
         // no need to validate morphed relation yet
+    }
+
+    protected function setNullFromRelated(Tuple $tuple, bool $isPreparing): void
+    {
+        if ($tuple->node->getRelation($this->getName()) !== null) {
+            // Set morph key to null if the relation was changed to null
+            $tuple->state->register($this->morphKey, null);
+        }
+
+        parent::setNullFromRelated($tuple, $isPreparing);
     }
 }

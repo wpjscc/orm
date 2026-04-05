@@ -91,6 +91,10 @@ class BelongsTo extends AbstractRelation implements DependencyInterface
         if ($related instanceof ReferenceInterface && $related->hasValue()) {
             $related = $related->getValue();
             $state->setRelation($relName, $related);
+            if ($related === null) {
+                $state->setRelationStatus($this->getName(), RelationInterface::STATUS_RESOLVED);
+                return;
+            }
         }
         if ($related === null) {
             $this->setNullFromRelated($tuple, false);
@@ -120,9 +124,41 @@ class BelongsTo extends AbstractRelation implements DependencyInterface
         }
     }
 
+    protected function setNullFromRelated(Tuple $tuple, bool $isPreparing): void
+    {
+        $state = $tuple->state;
+        $node = $tuple->node;
+        if (!$this->isNullable()) {
+            if ($isPreparing) {
+                // set null unchanged fields
+                $changes = $state->getChanges();
+                foreach ($this->innerKeys as $innerKey) {
+                    if (!isset($changes[$innerKey])) {
+                        $state->register($innerKey, null);
+                        // Field must be filled
+                        $state->waitField($innerKey, true);
+                    }
+                }
+                $tuple->state->setRelationStatus($this->getName(), RelationInterface::STATUS_PROCESS);
+            } elseif (!$this->checkNullValuePossibility($tuple)) {
+                throw new NullException(\sprintf('Relation `%s`.%s can not be null.', $node->getRole(), (string) $this));
+            }
+            return;
+        }
+
+        $original = $node->getRelation($this->getName());
+        if ($original !== null) {
+            // reset keys
+            foreach ($this->innerKeys as $innerKey) {
+                $state->register($innerKey, null);
+            }
+        }
+        $state->setRelationStatus($this->getName(), RelationInterface::STATUS_RESOLVED);
+    }
+
     private function shouldPull(Tuple $tuple, Tuple $rTuple): bool
     {
-        $minStatus = Tuple::STATUS_PREPROCESSED;
+        $minStatus = Tuple::STATUS_DEFERRED_RESOLVED;
         if ($this->inversion !== null) {
             $relName = $this->getTargetRelationName();
             if ($rTuple->state->getRelationStatus($relName) === RelationInterface::STATUS_RESOLVED) {
@@ -140,6 +176,10 @@ class BelongsTo extends AbstractRelation implements DependencyInterface
         $noChanges = true;
         $toReference = [];
         foreach ($this->outerKeys as $i => $outerKey) {
+            if (!\array_key_exists($outerKey, $newData)) {
+                return false;
+            }
+
             $innerKey = $this->innerKeys[$i];
             if (!\array_key_exists($innerKey, $oldData) || $oldData[$innerKey] !== $newData[$outerKey]) {
                 return true;
@@ -212,37 +252,5 @@ class BelongsTo extends AbstractRelation implements DependencyInterface
         $tuple->state->setRelation($this->getName(), new Reference($this->target, $values));
         $tuple->state->setRelationStatus($this->getName(), RelationInterface::STATUS_RESOLVED);
         return true;
-    }
-
-    private function setNullFromRelated(Tuple $tuple, bool $isPreparing): void
-    {
-        $state = $tuple->state;
-        $node = $tuple->node;
-        if (!$this->isNullable()) {
-            if ($isPreparing) {
-                // set null unchanged fields
-                $changes = $state->getChanges();
-                foreach ($this->innerKeys as $innerKey) {
-                    if (!isset($changes[$innerKey])) {
-                        $state->register($innerKey, null);
-                        // Field must be filled
-                        $state->waitField($innerKey, true);
-                    }
-                }
-                $tuple->state->setRelationStatus($this->getName(), RelationInterface::STATUS_PROCESS);
-            } elseif (!$this->checkNullValuePossibility($tuple)) {
-                throw new NullException(\sprintf('Relation `%s`.%s can not be null.', $node->getRole(), (string) $this));
-            }
-            return;
-        }
-
-        $original = $node->getRelation($this->getName());
-        if ($original !== null) {
-            // reset keys
-            foreach ($this->innerKeys as $innerKey) {
-                $state->register($innerKey, null);
-            }
-        }
-        $state->setRelationStatus($this->getName(), RelationInterface::STATUS_RESOLVED);
     }
 }

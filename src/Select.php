@@ -4,9 +4,11 @@ declare(strict_types=1);
 
 namespace Cycle\ORM;
 
+use Cycle\Database\Injection\FragmentInterface;
 use Cycle\Database\Injection\Parameter;
 use Cycle\Database\Query\SelectQuery;
 use Cycle\ORM\Heap\Node;
+use Cycle\ORM\Select\Options\LoadOptions;
 use Cycle\ORM\Service\EntityFactoryInterface;
 use Cycle\ORM\Service\MapperProviderInterface;
 use Cycle\ORM\Service\SourceProviderInterface;
@@ -20,32 +22,6 @@ use Spiral\Pagination\PaginableInterface;
  * Query builder and entity selector. Mocks SelectQuery. Attention, Selector does not mount RootLoader scope by default.
  *
  * Trait provides the ability to transparently configure underlying loader query.
- *
- * @method $this distinct()
- * @method $this where(...$args)
- * @method $this andWhere(...$args);
- * @method $this orWhere(...$args);
- * @method $this having(...$args);
- * @method $this andHaving(...$args);
- * @method $this orHaving(...$args);
- * @method $this orderBy($expression, $direction = 'ASC');
- * @method $this forUpdate()
- * @method $this whereJson(string $path, mixed $value)
- * @method $this orWhereJson(string $path, mixed $value)
- * @method $this whereJsonContains(string $path, mixed $value, bool $encode = true, bool $validate = true)
- * @method $this orWhereJsonContains(string $path, mixed $value, bool $encode = true, bool $validate = true)
- * @method $this whereJsonDoesntContain(string $path, mixed $value, bool $encode = true, bool $validate = true)
- * @method $this orWhereJsonDoesntContain(string $path, mixed $value, bool $encode = true, bool $validate = true)
- * @method $this whereJsonContainsKey(string $path)
- * @method $this orWhereJsonContainsKey(string $path)
- * @method $this whereJsonDoesntContainKey(string $path)
- * @method $this orWhereJsonDoesntContainKey(string $path)
- * @method $this whereJsonLength(string $path, int $length, string $operator = '=')
- * @method $this orWhereJsonLength(string $path, int $length, string $operator = '=')
- * @method mixed avg($identifier) Perform aggregation (AVG) based on column or expression value.
- * @method mixed min($identifier) Perform aggregation (MIN) based on column or expression value.
- * @method mixed max($identifier) Perform aggregation (MAX) based on column or expression value.
- * @method mixed sum($identifier) Perform aggregation (SUM) based on column or expression value.
  *
  * @template-covariant TEntity of object
  */
@@ -86,6 +62,45 @@ class Select implements \IteratorAggregate, \Countable, PaginableInterface
             $orm->resolveRole($role),
         );
         $this->builder = new QueryBuilder($this->loader->getQuery(), $this->loader);
+    }
+
+    /**
+     * Override the source table for the query. Useful when the entity schema points to one table
+     * but at runtime you need to read from a different one (e.g. an archive or partition).
+     *
+     * The entity mapping, column aliases and relations remain unchanged — only the
+     * FROM clause is replaced:
+     *
+     *     // Read users from an archive table instead of the default one
+     *     $select->from('user_archive')->where('id', 1)->fetchOne();
+     *
+     *     // Combine with relations — comments are still loaded from their own table
+     *     $select->from('user_archive')
+     *         ->load('comments')
+     *         ->orderBy('id')
+     *         ->fetchAll();
+     *
+     * @param non-empty-string $table
+     *
+     * @return static<TEntity>
+     */
+    public function from(string $table): static
+    {
+        $this->loader->getQuery()->from(\sprintf('%s AS %s', $table, $this->loader->getAlias()));
+        return $this;
+    }
+
+    /**
+     * Mark query to return only distinct results.
+     *
+     *     $select->distinct()->fetchAll();
+     *
+     * @return static<TEntity>
+     */
+    public function distinct(): static
+    {
+        $this->builder->distinct();
+        return $this;
     }
 
     /**
@@ -138,6 +153,385 @@ class Select implements \IteratorAggregate, \Countable, PaginableInterface
     }
 
     /**
+     * Add a WHERE condition to the query. Supports multiple calling conventions.
+     *
+     * Simple equality and comparison:
+     *
+     *     // Equality (column, value)
+     *     $select->where('id', 2);
+     *     $select->where('status', 'active');
+     *     // Operator comparison (column, operator, value)
+     *     $select->where('level', '>=', 10);
+     *     $select->where('deleted_at', '=', null);
+     *     $select->where('name', 'LIKE', '%john%');
+     *     // BETWEEN (column, 'between', from, to)
+     *     $select->where('comments.id', 'between', 1, 4);
+     *
+     * Array syntax allows multiple conditions (AND by default):
+     *
+     *     // Simple equalities
+     *     $select->where(['id' => 2]);
+     *     $select->where(['key1' => 1, 'key2' => 2]);
+     *     // IN clause using Parameter
+     *     $select->where(['id' => new Parameter([1, 2])]);
+     *     // Operator syntax
+     *     $select->where(['id' => ['>' => 0, '<' => 3]]);
+     *     $select->where(['comments.id' => ['between' => [1, 4]]]);
+     *
+     * Logical grouping with "@or" / "@AND":
+     *
+     *     $select->where([
+     *         "@or" => [
+     *             ['comments.message' => 'msg 1'],
+     *             ['comments.message' => 'msg 3'],
+     *         ],
+     *     ]);
+     *
+     *     $select->where([
+     *         "@AND" => [
+     *             ['name' => 'Valeriy'],
+     *             ['level' => ['>=' => 10]],
+     *         ],
+     *     ]);
+     *
+     * Closure for nested or complex conditions:
+     *
+     *     $select->where(function (\Cycle\ORM\Select\QueryBuilder $q): void {
+     *         $q->where('id', 2);
+     *     });
+     *
+     *     // Combining AND / OR inside a closure
+     *     $select->where(function (\Cycle\ORM\Select\QueryBuilder $q): void {
+     *         $q->where('comments.message', 'msg 3')
+     *           ->orWhere(function (\Cycle\ORM\Select\QueryBuilder $q): void {
+     *               $q->where('id', 1);
+     *           });
+     *     });
+     *
+     * Raw SQL fragments and expressions:
+     *
+     *     // Fragment with bound parameters
+     *     $select->where(new \Cycle\Database\Injection\Fragment('fp.filter_id = ?', 5));
+     *     // Expression as a value
+     *     $select->where('comments.id', new \Cycle\Database\Injection\Expression('user.id'));
+     *
+     * When used with relations joined via {@see with()}, prefix columns with the relation alias:
+     *
+     *     $select->with('comments')->where('comments.approved', true);
+     *     $select->with('posts.comments')->where('posts_comments.approved', true);
+     *
+     * @param mixed ...$args [(column, value), (column, operator, value), (array), (closure), (Fragment)]
+     *
+     * @return static<TEntity>
+     */
+    public function where(mixed ...$args): static
+    {
+        $this->builder->where(...$args);
+        return $this;
+    }
+
+    /**
+     * Add an AND WHERE condition to the query. Behaves identically to {@see where()},
+     * but explicitly uses AND conjunction when chaining multiple conditions.
+     *
+     *     $select->where('status', 'active')->andWhere('balance', '>', 0);
+     *     $select->andWhere(['role' => 'admin', 'active' => true]);
+     *
+     * @param mixed ...$args [(column, value), (column, operator, value), (array), (closure), (Fragment)]
+     *
+     * @return static<TEntity>
+     *
+     * @see where()
+     */
+    public function andWhere(mixed ...$args): static
+    {
+        $this->builder->andWhere(...$args);
+        return $this;
+    }
+
+    /**
+     * Add an OR WHERE condition to the query. Accepts the same arguments as {@see where()},
+     * but uses OR conjunction.
+     *
+     *     $select->where('id', 1)->orWhere('id', 2);
+     *
+     *     // Closure for grouped OR conditions
+     *     $select->where('status', 'active')->orWhere(function (\Cycle\ORM\Select\QueryBuilder $q): void {
+     *         $q->where('role', 'admin')
+     *           ->where('balance', '>', 0);
+     *     });
+     *
+     * @param mixed ...$args [(column, value), (column, operator, value), (array), (closure), (Fragment)]
+     *
+     * @return static<TEntity>
+     *
+     * @see where()
+     */
+    public function orWhere(mixed ...$args): static
+    {
+        $this->builder->orWhere(...$args);
+        return $this;
+    }
+
+    /**
+     * Add a HAVING condition to the query. Typically used with {@see SelectQuery::groupBy()}
+     * to filter aggregated results.
+     *
+     *     $select->having('COUNT(comments.id)', '>', 5);
+     *     $select->having(['COUNT(id)' => ['>=' => 10]]);
+     *
+     * @param mixed ...$args [(column, value), (column, operator, value), (array), (closure)]
+     *
+     * @return static<TEntity>
+     */
+    public function having(mixed ...$args): static
+    {
+        $this->builder->having(...$args);
+        return $this;
+    }
+
+    /**
+     * Add an AND HAVING condition to the query.
+     *
+     *     $select->having('COUNT(id)', '>', 5)->andHaving('SUM(balance)', '<', 1000);
+     *
+     * @param mixed ...$args [(column, value), (column, operator, value), (array), (closure)]
+     *
+     * @return static<TEntity>
+     *
+     * @see having()
+     */
+    public function andHaving(mixed ...$args): static
+    {
+        $this->builder->andHaving(...$args);
+        return $this;
+    }
+
+    /**
+     * Add an OR HAVING condition to the query.
+     *
+     *     $select->having('COUNT(id)', '>', 10)->orHaving('SUM(balance)', '>', 1000);
+     *
+     * @param mixed ...$args [(column, value), (column, operator, value), (array), (closure)]
+     *
+     * @return static<TEntity>
+     *
+     * @see having()
+     */
+    public function orHaving(mixed ...$args): static
+    {
+        $this->builder->orHaving(...$args);
+        return $this;
+    }
+
+    /**
+     * Sort results by column, expression or multiple columns at once.
+     *
+     *     $select->orderBy('id');
+     *     $select->orderBy('created_at', 'DESC');
+     *
+     *     // Multiple columns
+     *     $select->orderBy([
+     *         'id' => 'ASC',
+     *         'name' => 'DESC',
+     *     ]);
+     *
+     *     // Raw expression (direction is ignored)
+     *     $select->orderBy(new \Cycle\Database\Injection\Fragment('RAND()'));
+     *
+     * @param non-empty-string|FragmentInterface|array<non-empty-string, non-empty-string> $expression
+     * @param 'ASC'|'DESC'|null $direction Sorting direction, default ASC.
+     *
+     * @return static<TEntity>
+     */
+    public function orderBy(string|FragmentInterface|array $expression, ?string $direction = 'ASC'): static
+    {
+        $this->builder->orderBy($expression, $direction);
+        return $this;
+    }
+
+    /**
+     * Add a FOR UPDATE lock to the query. Selected rows will be locked for the duration
+     * of the current transaction, preventing other transactions from modifying them.
+     *
+     *     // Inside a transaction
+     *     $user = $select->where('id', 1)->forUpdate()->fetchOne();
+     *     $user->balance -= 100;
+     *
+     * @return static<TEntity>
+     */
+    public function forUpdate(): static
+    {
+        $this->builder->forUpdate();
+        return $this;
+    }
+
+    /**
+     * Filter by JSON field value using exact match.
+     *
+     *     $select->whereJson('settings->theme', 'dark');
+     *     $select->whereJson('meta->score', 10);
+     *
+     * @return static<TEntity>
+     */
+    public function whereJson(string $path, mixed $value): static
+    {
+        $this->builder->whereJson($path, $value);
+        return $this;
+    }
+
+    /**
+     * OR version of {@see whereJson()}.
+     *
+     *     $select->whereJson('settings->theme', 'dark')
+     *         ->orWhereJson('settings->theme', 'light');
+     *
+     * @return static<TEntity>
+     */
+    public function orWhereJson(string $path, mixed $value): static
+    {
+        $this->builder->orWhereJson($path, $value);
+        return $this;
+    }
+
+    /**
+     * Filter rows where a JSON array or object contains the given value.
+     *
+     *     $select->whereJsonContains('tags', 'php');
+     *     $select->whereJsonContains('meta->roles', 'admin');
+     *
+     * @return static<TEntity>
+     */
+    public function whereJsonContains(string $path, mixed $value, bool $encode = true, bool $validate = true): static
+    {
+        $this->builder->whereJsonContains($path, $value, $encode, $validate);
+        return $this;
+    }
+
+    /**
+     * OR version of {@see whereJsonContains()}.
+     *
+     *     $select->whereJsonContains('tags', 'php')
+     *         ->orWhereJsonContains('tags', 'go');
+     *
+     * @return static<TEntity>
+     */
+    public function orWhereJsonContains(string $path, mixed $value, bool $encode = true, bool $validate = true): static
+    {
+        $this->builder->orWhereJsonContains($path, $value, $encode, $validate);
+        return $this;
+    }
+
+    /**
+     * Filter rows where a JSON array or object does NOT contain the given value.
+     *
+     *     $select->whereJsonDoesntContain('tags', 'deprecated');
+     *
+     * @return static<TEntity>
+     */
+    public function whereJsonDoesntContain(string $path, mixed $value, bool $encode = true, bool $validate = true): static
+    {
+        $this->builder->whereJsonDoesntContain($path, $value, $encode, $validate);
+        return $this;
+    }
+
+    /**
+     * OR version of {@see whereJsonDoesntContain()}.
+     *
+     *     $select->whereJsonDoesntContain('tags', 'a')
+     *         ->orWhereJsonDoesntContain('tags', 'b');
+     *
+     * @return static<TEntity>
+     */
+    public function orWhereJsonDoesntContain(string $path, mixed $value, bool $encode = true, bool $validate = true): static
+    {
+        $this->builder->orWhereJsonDoesntContain($path, $value, $encode, $validate);
+        return $this;
+    }
+
+    /**
+     * Filter rows where a key exists in a JSON object.
+     *
+     *     $select->whereJsonContainsKey('settings->notifications');
+     *
+     * @return static<TEntity>
+     */
+    public function whereJsonContainsKey(string $path): static
+    {
+        $this->builder->whereJsonContainsKey($path);
+        return $this;
+    }
+
+    /**
+     * OR version of {@see whereJsonContainsKey()}.
+     *
+     *     $select->whereJsonContainsKey('settings->email')
+     *         ->orWhereJsonContainsKey('settings->sms');
+     *
+     * @return static<TEntity>
+     */
+    public function orWhereJsonContainsKey(string $path): static
+    {
+        $this->builder->orWhereJsonContainsKey($path);
+        return $this;
+    }
+
+    /**
+     * Filter rows where a key does NOT exist in a JSON object.
+     *
+     *     $select->whereJsonDoesntContainKey('settings->legacy_flag');
+     *
+     * @return static<TEntity>
+     */
+    public function whereJsonDoesntContainKey(string $path): static
+    {
+        $this->builder->whereJsonDoesntContainKey($path);
+        return $this;
+    }
+
+    /**
+     * OR version of {@see whereJsonDoesntContainKey()}.
+     *
+     *     $select->whereJsonDoesntContainKey('settings->a')
+     *         ->orWhereJsonDoesntContainKey('settings->b');
+     *
+     * @return static<TEntity>
+     */
+    public function orWhereJsonDoesntContainKey(string $path): static
+    {
+        $this->builder->orWhereJsonDoesntContainKey($path);
+        return $this;
+    }
+
+    /**
+     * Filter rows by the length of a JSON array.
+     *
+     *     $select->whereJsonLength('tags', 3);
+     *     $select->whereJsonLength('tags', 5, '>');
+     *
+     * @return static<TEntity>
+     */
+    public function whereJsonLength(string $path, int $length, string $operator = '='): static
+    {
+        $this->builder->whereJsonLength($path, $length, $operator);
+        return $this;
+    }
+
+    /**
+     * OR version of {@see whereJsonLength()}.
+     *
+     *     $select->whereJsonLength('tags', 0)
+     *         ->orWhereJsonLength('roles', 0);
+     *
+     * @return static<TEntity>
+     */
+    public function orWhereJsonLength(string $path, int $length, string $operator = '='): static
+    {
+        $this->builder->orWhereJsonLength($path, $length, $operator);
+        return $this;
+    }
+
+    /**
      * Attention, column will be quoted by driver!
      *
      * @param non-empty-string|null $column When column is null DISTINCT(PK) will be generated.
@@ -151,7 +545,69 @@ class Select implements \IteratorAggregate, \Countable, PaginableInterface
                 : \sprintf('DISTINCT(%s)', \reset($pk));
         }
 
-        return (int) $this->__call('count', [$column]);
+        return (int) $this->builder->withQuery(
+            $this->buildQuery(),
+        )->count($column);
+    }
+
+    /**
+     * Perform AVG aggregation on the given column or expression.
+     *
+     *     $avgBalance = $select->avg('balance');
+     *     $avgScore = $select->where('status', 'active')->avg('score');
+     *
+     * @param non-empty-string $identifier Column or expression to aggregate.
+     */
+    public function avg(string $identifier): mixed
+    {
+        return $this->builder->withQuery(
+            $this->buildQuery(),
+        )->avg($identifier);
+    }
+
+    /**
+     * Perform MIN aggregation on the given column or expression.
+     *
+     *     $minBalance = $select->min('balance');
+     *     $minPrice = $select->where('active', true)->min('price');
+     *
+     * @param non-empty-string $identifier Column or expression to aggregate.
+     */
+    public function min(string $identifier): mixed
+    {
+        return $this->builder->withQuery(
+            $this->buildQuery(),
+        )->min($identifier);
+    }
+
+    /**
+     * Perform MAX aggregation on the given column or expression.
+     *
+     *     $maxBalance = $select->max('balance');
+     *     $maxLevel = $select->where('role', 'admin')->max('level');
+     *
+     * @param non-empty-string $identifier Column or expression to aggregate.
+     */
+    public function max(string $identifier): mixed
+    {
+        return $this->builder->withQuery(
+            $this->buildQuery(),
+        )->max($identifier);
+    }
+
+    /**
+     * Perform SUM aggregation on the given column or expression.
+     *
+     *     $totalBalance = $select->sum('balance');
+     *     $totalSpent = $select->where('year', 2025)->sum('amount');
+     *
+     * @param non-empty-string $identifier Column or expression to aggregate.
+     */
+    public function sum(string $identifier): mixed
+    {
+        return $this->builder->withQuery(
+            $this->buildQuery(),
+        )->sum($identifier);
     }
 
     /**
@@ -177,60 +633,61 @@ class Select implements \IteratorAggregate, \Countable, PaginableInterface
     }
 
     /**
-     * Request primary selector loader to pre-load relation name. Any type of loader can be used
-     * for data pre-loading. ORM loaders by default will select the most efficient way to load
-     * related data which might include additional select query or left join. Loaded data will
-     * automatically pre-populate record relations. You can specify nested relations using "."
-     * separator.
+     * Pre-load related data for the given relation(s).
      *
-     * Examples:
+     * The loader automatically selects the most efficient strategy (additional query or JOIN).
+     * Loaded data is populated into entity relations. Use "." to specify nested relations.
      *
-     *     // Select users and load their comments (will cast 2 queries, HAS_MANY comments)
-     *     User::find()->with('comments');
+     * Use typed DTO options for a safe, discoverable API:
      *
-     *     // You can load chain of relations - select user and load their comments and post related to comment
-     *     User::find()->with('comments.post');
+     *     use Cycle\ORM\Select\Options\HasManyLoadOptions;
+     *     use Cycle\ORM\Select\Options\LoadMethod;
      *
-     *     // We can also specify custom where conditions on data loading, let's load only public comments.
-     *     User::find()->load('comments', [
-     *         'where' => ['{@}.status' => 'public']
-     *     ]);
+     *     // Load comments using a separate query (default for HasMany)
+     *     $select->load('comments', new HasManyLoadOptions());
      *
-     * Please note using "{@}" column name, this placeholder is required to prevent collisions and
-     * it will be automatically replaced with valid table alias of pre-loaded comments table.
+     *     // Force loading within the same query via JOIN
+     *     $select->load('comments', new HasManyLoadOptions(
+     *         method: LoadMethod::SingleQuery,
+     *     ));
      *
-     *     // In case where your loaded relation is MANY_TO_MANY you can also specify pivot table
-     *     // conditions, let's pre-load all approved user tags, we can use same placeholder for pivot
-     *     // table alias
-     *     User::find()->load('tags', [
-     *          'wherePivot' => ['{@}.approved' => true]
-     *     ]);
+     *     // Custom WHERE / ORDER BY
+     *     $select->load('comments', new HasManyLoadOptions(
+     *         where: ['@.status' => 'public'],
+     *         orderBy: ['@.created_at' => 'DESC'],
+     *     ));
      *
-     *     // In most of cases you don't need to worry about how data was loaded, using external query
-     *     // or left join, however if you want to change such behaviour you can force load method
-     *     // using {@see Select::SINGLE_QUERY}
-     *     User::find()->load('tags', [
-     *          'method'     => Select::SINGLE_QUERY,
-     *          'wherePivot' => ['{@}.approved' => true]
-     *     ]);
+     *     // Load from an archive table
+     *     $select->load('comments', new HasManyLoadOptions(
+     *         table: 'comment_archive',
+     *     ));
      *
-     * Attention, you will not be able to correctly paginate in this case and only ORM loaders
-     * support different loading types.
+     * Available DTO classes (one per relation type):
+     * - {@see \Cycle\ORM\Select\Options\HasOneLoadOptions}
+     * - {@see \Cycle\ORM\Select\Options\HasManyLoadOptions}
+     * - {@see \Cycle\ORM\Select\Options\BelongsToLoadOptions} applicable for both Belongs To and Refers To relations
+     * - {@see \Cycle\ORM\Select\Options\ManyToManyLoadOptions}
+     * - {@see \Cycle\ORM\Select\Options\MorphedHasOneLoadOptions}
+     * - {@see \Cycle\ORM\Select\Options\MorphedHasManyLoadOptions}
+     * - {@see \Cycle\ORM\Select\Options\BelongsToMorphedLoadOptions}
      *
-     * You can specify multiple loaders using array as first argument.
+     * Raw array options are still supported for backwards compatibility:
      *
-     * Example:
+     *     $select->load('comments', ['where' => ['@.status' => 'public']]);
      *
-     *     User::find()->load(['posts', 'comments', 'profile']);
+     * Multiple relations can be loaded at once. The second argument applies
+     * shared options to every relation in the list:
      *
-     * Attention, consider disabling entity map if you want to use recursive loading (i.e
-     * post.tags.posts), but first think why you even need recursive relation loading.
+     *     $select->load(['posts', 'comments', 'profile']);
+     *     $select->load(['posts', 'comments'], new JoinableLoadOptions(
+     *         method: LoadMethod::SingleQuery,
+     *     ));
      *
      * @see with()
      *
      * @return static<TEntity>
      */
-    public function load(string|array $relation, array $options = []): self
+    public function load(array|string $relation, LoadOptions|array $options = []): self
     {
         if (\is_string($relation)) {
             $this->loader->loadRelation($relation, $options, false, true);
@@ -244,7 +701,7 @@ class Select implements \IteratorAggregate, \Countable, PaginableInterface
                 $this->load($subOption, $options);
             } else {
                 // multiple relations or relation with addition load options
-                $this->load($name, $subOption + $options);
+                $this->load($name, $subOption);
             }
         }
 
@@ -445,13 +902,6 @@ class Select implements \IteratorAggregate, \Countable, PaginableInterface
      */
     public function __call(string $name, array $arguments): mixed
     {
-        if (\in_array(\strtoupper($name), ['AVG', 'MIN', 'MAX', 'SUM', 'COUNT'])) {
-            // aggregations
-            return $this->builder->withQuery(
-                $this->buildQuery(),
-            )->__call($name, $arguments);
-        }
-
         $result = $this->builder->__call($name, $arguments);
         if ($result instanceof QueryBuilder) {
             return $this;

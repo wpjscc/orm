@@ -9,6 +9,7 @@ use Cycle\ORM\Mapper\Mapper;
 use Cycle\ORM\Reference\ReferenceInterface;
 use Cycle\ORM\Relation;
 use Cycle\ORM\Schema;
+use Cycle\ORM\Select;
 use Cycle\ORM\Tests\Functional\Driver\Common\BaseTest;
 use Cycle\ORM\Tests\Fixtures\Image;
 use Cycle\ORM\Tests\Fixtures\ImagedInterface;
@@ -271,6 +272,106 @@ abstract class BelongsToMorphedRelationTest extends BaseTest
         $this->orm = $this->orm->withHeap(new Heap());
         $c = $this->orm->getRepository(Image::class)->findByPK(1);
         $this->assertNull($c->parent);
+    }
+
+    /**
+     * When setting a morphed relation to null, both parent_id AND parent_type
+     * should be cleared in the database.
+     */
+    public function testSetNullShouldClearMorphType(): void
+    {
+        $schemaArray = $this->getNullableMorphedSchemaArray();
+        $this->orm = $this->withSchema(new Schema($schemaArray));
+
+        $c = $this->orm->getRepository(Image::class)->findByPK(1);
+
+        // Verify the image initially has a parent_type
+        $row = $this->getDatabase()->table('image')->select()->where('id', 1)->fetchAll();
+        $this->assertSame('user', $row[0]['parent_type']);
+        $this->assertNotNull($row[0]['parent_id']);
+        $this->save($c);
+
+        $c->parent = null;
+        $this->save($c);
+
+        // After setting parent to null, both parent_id and parent_type should be NULL
+        $row = $this->getDatabase()->table('image')->select()->where('id', 1)->fetchAll();
+        $this->assertNull($row[0]['parent_id'], 'parent_id should be NULL after setting relation to null');
+        $this->assertNull($row[0]['parent_type'], 'parent_type should be NULL after setting relation to null');
+    }
+
+    /**
+     * When creating a new entity without setting the morphed relation,
+     * parent_type should not be written to the database.
+     */
+    public function testCreateWithoutParentShouldNotSetMorphType(): void
+    {
+        $schemaArray = $this->getNullableMorphedSchemaArray();
+        $this->orm = $this->withSchema(new Schema($schemaArray));
+
+        $c = new Image();
+        $c->url = 'no-parent.png';
+
+        $this->save($c);
+
+        $row = $this->getDatabase()->table('image')->select()->where('id', 6)->fetchAll();
+        $this->assertNull($row[0]['parent_id'], 'parent_id should be NULL for entity without parent');
+        $this->assertNull($row[0]['parent_type'], 'parent_type should be NULL for entity without parent');
+    }
+
+    public function testUsingFactoryCreateWithoutRelatedButSetMorphTypeManually(): void
+    {
+        $schemaArray = $this->getNullableMorphedSchemaArray();
+        $this->orm = $this->orm->with(
+            schema: new Schema($schemaArray),
+        );
+
+        /** @var Image $c */
+        $c = $this->orm->make(Image::class);
+        $c->url = 'no-parent.png';
+        $c->parentType = 'user';
+
+        $this->save($c);
+
+        $row = $this->getDatabase()->table('image')->select()->where('id', $c->id)->fetchAll();
+        $this->assertNull($row[0]['parent_id'], 'parent_id should be NULL for entity without parent');
+        $this->assertSame('user', $row[0]['parent_type'], 'parent_type should be NULL for entity without parent');
+    }
+
+    public function testCreateWithoutRelatedButSetMorphTypeManually(): void
+    {
+        $schemaArray = $this->getNullableMorphedSchemaArray();
+        $this->orm = $this->orm->with(
+            schema: new Schema($schemaArray),
+        );
+
+        $c = new Image();
+        $c->url = 'no-parent.png';
+        $c->parentType = 'user';
+
+        $this->save($c);
+
+        $row = $this->getDatabase()->table('image')->select()->where('id', $c->id)->fetchAll();
+        $this->assertNull($row[0]['parent_id'], 'parent_id should be NULL for entity without parent');
+        $this->assertSame('user', $row[0]['parent_type'], 'parent_type should be NULL for entity without parent');
+    }
+
+    public function testUpdateRelation(): void
+    {
+        $this->captureReadQueries();
+        /** @var list<Image> $images */
+        $images = (new Select($this->orm, Image::class))->fetchAll();
+        $this->assertNumReads(1);
+
+        $this->captureReadQueries();
+        $this->bulkLoader(...$images)->load('parent')->run();
+        $this->assertNumReads(2);
+
+        $this->captureReadQueries();
+        foreach ($images as $image) {
+            $this->assertNotNull($image->parent);
+        }
+        $this->assertNumReads(0);
     }
 
     public function setUp(): void

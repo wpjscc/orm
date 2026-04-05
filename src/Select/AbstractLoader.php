@@ -10,6 +10,7 @@ use Cycle\ORM\Exception\LoaderException;
 use Cycle\ORM\Exception\SchemaException;
 use Cycle\ORM\FactoryInterface;
 use Cycle\ORM\Parser\AbstractNode;
+use Cycle\ORM\Select\Options\LoadOptions;
 use Cycle\ORM\Service\SourceProviderInterface;
 use Cycle\ORM\Relation;
 use Cycle\ORM\SchemaInterface;
@@ -85,16 +86,24 @@ abstract class AbstractLoader implements LoaderInterface
      */
     protected array $children;
 
+    /** @var non-empty-string */
+    protected string $table;
+
     protected SourceInterface $source;
 
     public function __construct(
         protected SchemaInterface $ormSchema,
         protected SourceProviderInterface $sourceProvider,
         protected FactoryInterface $factory,
+
+        /**
+         * @var non-empty-string Target role
+         */
         protected string $target,
     ) {
         $this->children = $this->ormSchema->getInheritedRoles($target);
         $this->source = $this->sourceProvider->getSource($target);
+        $this->table = $this->source->getTable();
     }
 
     public function isHierarchical(): bool
@@ -146,10 +155,14 @@ abstract class AbstractLoader implements LoaderInterface
      */
     public function loadRelation(
         string|LoaderInterface $relation,
-        array $options,
+        LoadOptions|array $options,
         bool $join = false,
         bool $load = false,
     ): LoaderInterface {
+        if ($options instanceof LoadOptions) {
+            $options = $options->toArray();
+        }
+
         if ($relation instanceof ParentLoader) {
             return $this->inherit = $relation->withContext($this);
         }
@@ -200,6 +213,11 @@ abstract class AbstractLoader implements LoaderInterface
         }
 
         try {
+            if (isset($options['table'])) {
+                $table = $options['table'];
+                unset($options['table']);
+            }
+
             // Creating new loader.
             $loader = $this->factory->loader(
                 $this->ormSchema,
@@ -207,6 +225,9 @@ abstract class AbstractLoader implements LoaderInterface
                 $this->target,
                 $relation,
             );
+
+            // Apply table name if provided
+            isset($table) && $loader instanceof self and $loader->table = $table;
         } catch (SchemaException | FactoryException $e) {
             if ($this->inherit instanceof self) {
                 return $this->inherit->loadRelation($relation, $options, $join, $load, $alias);
@@ -218,7 +239,8 @@ abstract class AbstractLoader implements LoaderInterface
             );
         }
 
-        return $loaders[$alias] = $loader->withContext($this, $options);
+        $loader = $loader->withContext($this, $options);
+        return $loaders[$alias] = $loader;
     }
 
     public function createNode(): AbstractNode
@@ -255,6 +277,13 @@ abstract class AbstractLoader implements LoaderInterface
     public function getSource(): SourceInterface
     {
         return $this->source;
+    }
+
+    public function withSource(SourceInterface $source): static
+    {
+        $clone = clone $this;
+        $clone->source = $source;
+        return $clone;
     }
 
     /**
@@ -398,6 +427,8 @@ abstract class AbstractLoader implements LoaderInterface
 
     /**
      * Returns list of relations to be automatically joined with parent object.
+     *
+     * @return \Generator<int, LoaderInterface|non-empty-string>
      */
     protected function getEagerLoaders(?string $role = null): \Generator
     {
@@ -406,7 +437,7 @@ abstract class AbstractLoader implements LoaderInterface
         if ($parentLoader !== null) {
             yield $parentLoader;
         }
-        yield from $this->generateSublassLoaders();
+        yield from $this->generateSubclassLoaders();
         yield from $this->generateEagerRelationLoaders($role);
     }
 
@@ -418,17 +449,23 @@ abstract class AbstractLoader implements LoaderInterface
             : $this->factory->loader($this->ormSchema, $this->sourceProvider, $role, FactoryInterface::PARENT_LOADER);
     }
 
-    protected function generateSublassLoaders(): iterable
+    /**
+     * @return iterable<LoaderInterface>
+     */
+    protected function generateSubclassLoaders(): iterable
     {
         if ($this->children !== []) {
-            foreach ($this->children as $subRole => $children) {
+            foreach ($this->children as $subRole => $_) {
                 yield $this->factory
                     ->loader($this->ormSchema, $this->sourceProvider, $subRole, FactoryInterface::CHILD_LOADER);
             }
         }
     }
 
-    protected function generateEagerRelationLoaders(string $target): \Generator
+    /**
+     * @return iterable<non-empty-string>
+     */
+    protected function generateEagerRelationLoaders(string $target): iterable
     {
         $relations = $this->ormSchema->define($target, SchemaInterface::RELATIONS) ?? [];
         foreach ($relations as $relation => $schema) {

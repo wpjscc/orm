@@ -15,6 +15,7 @@ use Cycle\ORM\ORM;
 use Cycle\ORM\ORMInterface;
 use Cycle\ORM\Reference\ReferenceInterface;
 use Cycle\ORM\Relation;
+use Cycle\ORM\Relation\RelationLoaderInterface;
 use Cycle\ORM\Schema;
 use Cycle\ORM\SchemaInterface;
 use Cycle\ORM\Tests\Fixtures\TestLogger;
@@ -255,7 +256,7 @@ abstract class BaseTest extends TestCase
         $r = new \ReflectionClass(Node::class);
 
         $rel = $r->getProperty('relations');
-        $rel->setAccessible(true);
+        PHP_VERSION_ID < 80100 and $rel->setAccessible(true);
 
         $heap = $orm->getHeap();
         foreach ($heap as $entity) {
@@ -388,5 +389,10 @@ abstract class BaseTest extends TestCase
     protected function getCommandGenerator(): ?Transaction\CommandGeneratorInterface
     {
         return null;
+    }
+
+    protected function bulkLoader(object ...$entities): RelationLoaderInterface
+    {
+        return (new Relation\BulkLoader($this->orm))->collect(...$entities);
     }
 }

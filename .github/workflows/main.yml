@@ -18,15 +18,17 @@ jobs:
           - ubuntu-latest
 
         php-version:
-          - "8.0"
           - "8.1"
           - "8.2"
           - "8.3"
           - "8.4"
+          - "8.5"
     steps:
       - name: Install ODBC driver.
         run: |
           sudo curl https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get clean
+          sudo apt-get update
           sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
 
       - name: 📦 Checkout
@@ -79,11 +81,11 @@ jobs:
           - ubuntu-latest
 
         php-version:
-          - "8.0"
           - "8.1"
           - "8.2"
           - "8.3"
           - "8.4"
+          - "8.5"
     steps:
       - name: 📦 Checkout
         uses: actions/checkout@v5
